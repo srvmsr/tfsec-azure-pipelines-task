@@ -8,7 +8,7 @@
     "category": "Test",
     "author": "Aqua Security",
     "version": { VERSION_PLACEHOLDER },
-    "instanceNameFormat": "Echo tfsec $(version)",
+    "instanceNameFormat": "tfsec $(version)",
     "inputs": [
         {
             "name": "version",
@@ -52,7 +52,7 @@
         }
     ],
     "execution": {
-        "Node10": {
+        "Node16": {
             "target": "index.js"
         }
     }

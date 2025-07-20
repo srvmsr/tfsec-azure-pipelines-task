@@ -236,7 +236,7 @@ function renderLocation(rowIndex: number, columnIndex: number, tableColumn: ITab
 
 function convertLocation(loc: CodeLocation): ISimpleListCell {
     let combined = loc.filename + ":" + loc.start_line
-    if (loc.start_line > loc.end_line) {
+    if (loc.end_line > loc.start_line) {
         combined += "-" + loc.end_line
     }
     return {
