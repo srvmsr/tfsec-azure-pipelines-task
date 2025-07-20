@@ -1,86 +1,191 @@
 import * as os from 'os';
 import * as util from 'util';
+import * as path from 'path';
+import * as fs from 'fs';
 import * as tool from 'azure-pipelines-tool-lib';
-import {ToolRunner} from 'azure-pipelines-task-lib/toolrunner';
+import { ToolRunner } from 'azure-pipelines-task-lib/toolrunner';
 import task = require('azure-pipelines-task-lib/task');
 
 async function run() {
     try {
-        console.log("Finding correct tfsec version...")
-        let url = await getArtifactURL()
-        let tmpPath = "/tmp/"
-        let bin = "tfsec"
-        let chmodRequired = true;
-        if (os.platform() == "win32") {
-            tmpPath = process.env["USERPROFILE"] + "\\AppData\\Local\\Temp\\"
-            bin = "tfsec.exe"
-            chmodRequired = false;
-        }
-        let localPath = tmpPath + bin;
-        task.rmRF(localPath);
+        task.debug('Starting tfsec Azure DevOps task');
 
-        console.log("Downloading tfsec...")
-        let downloadPath = await tool.downloadTool(url, localPath);
-        if (chmodRequired) {
-            await task.exec('chmod', ["+x", downloadPath]);
+        // Get the tfsec version input, validate or use default
+        let version: string | undefined = task.getInput('version', false);
+        if (!version || version.trim() === '') {
+            version = 'v1.26.0';
+            task.debug(`No version specified, defaulting to ${version}`);
+        } else {
+            version = version.trim();
+            if (!/^v?\d+\.\d+\.\d+/.test(version)) {
+                throw new Error(`Invalid version format: ${version}. Expected format like v1.26.0`);
+            }
+            if (!version.startsWith('v')) {
+                version = 'v' + version;
+            }
+            task.debug(`Using specified tfsec version: ${version}`);
         }
 
-        console.log("Preparing output location...")
-        let outputPath = tmpPath + "tfsec-results-" + Math.random();
-        task.rmRF(outputPath);
+        // Determine platform and architecture
+        const platform = (() => {
+            const p = os.platform();
+            if (p === 'win32') return 'windows';
+            if (p === 'darwin') return 'darwin';
+            if (p === 'linux') return 'linux';
+            throw new Error(`Unsupported platform: ${p}`);
+        })();
 
-        console.log("Configuring options...")
-        let runner: ToolRunner = task.tool(downloadPath);
-        let args = task.getInput("args", false)
-        if (args !== undefined) {
-            runner.line(args)
+        const arch = (() => {
+            const a = os.arch();
+            if (a === 'x64') return 'amd64';
+            if (a === 'arm64') return 'arm64';
+            if (a === 'arm') return 'arm';
+            if (a === 'ia32') return '386';
+            throw new Error(`Unsupported architecture: ${a}`);
+        })();
+
+        const extension = platform === 'windows' ? '.exe' : '';
+        const artifactName = `tfsec-${platform}-${arch}${extension}`;
+
+        // Construct download URL
+        const url = `https://github.com/aquasecurity/tfsec/releases/download/${version}/${artifactName}`;
+        task.debug(`Downloading tfsec from URL: ${url}`);
+
+        // Prepare temporary directory and binary path
+        const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'tfsec-'));
+        const binPath = path.join(tmpDir, `tfsec${extension}`);
+
+        // Clean up any existing file (unlikely due to mkdtemp, but safe)
+        if (fs.existsSync(binPath)) {
+            task.rmRF(binPath);
         }
-        if (task.getBoolInput("debug", false)) {
-            runner.arg("--debug")
+
+        // Download tfsec binary
+        const downloadPath = await tool.downloadTool(url, binPath);
+        task.debug(`Downloaded tfsec to ${downloadPath}`);
+
+        // Set executable permissions if needed
+        if (platform !== 'windows') {
+            await task.exec('chmod', ['+x', downloadPath]);
+            task.debug('Set executable permissions on tfsec binary');
         }
-        runner.arg(["-f", "junit,json"]);
-        runner.arg(["-O", outputPath]);
-        let dir = task.getInput("dir", false)
-        if (dir !== undefined) {
-            runner.arg(dir)
+
+        // Prepare output directory for results
+        const outputDir = path.join(tmpDir, 'tfsec-results');
+        if (fs.existsSync(outputDir)) {
+            task.rmRF(outputDir);
+        }
+        await fs.promises.mkdir(outputDir, { recursive: true });
+
+        // Configure tfsec command runner
+        const runner: ToolRunner = task.tool(downloadPath);
+
+        // Add user-supplied args if any
+        const argsInput = task.getInput('args', false);
+        if (argsInput && argsInput.trim() !== '') {
+            // Split args respecting quoted strings
+            const argsArray = parseArgs(argsInput);
+            runner.arg(argsArray);
+            task.debug(`Added user args: ${argsArray.join(' ')}`);
+        }
+
+        // Add debug flag if enabled
+        if (task.getBoolInput('debug', false)) {
+            runner.arg('--debug');
+            task.debug('Debug mode enabled');
+        }
+
+        // Force output formats and output directory
+        runner.arg(['-f', 'junit,json']);
+        runner.arg(['-O', outputDir]);
+
+        // Directory to scan
+        const scanDir = task.getInput('dir', false);
+        if (scanDir && scanDir.trim() !== '') {
+            runner.arg(scanDir.trim());
+            task.debug(`Scanning directory: ${scanDir.trim()}`);
         } else {
             runner.arg(task.cwd());
+            task.debug(`Scanning current working directory: ${task.cwd()}`);
         }
 
-        console.log("Running tfsec...")
-        let result = runner.execSync();
-        if (result.code === 0) {
-            task.setResult(task.TaskResult.Succeeded, "No problems found.")
+        // Execute tfsec with timeout (e.g., 5 minutes)
+        const execOptions = { failOnStdErr: false, ignoreReturnCode: true, silent: false, timeout: 300000 };
+        task.debug('Running tfsec scan...');
+        const result = await runner.exec(execOptions);
+        task.debug(`tfsec exited with code ${result}`);
+
+        // Determine task result based on exit code
+        // tfsec returns 0 if no issues, 1 if issues found, >1 for errors
+        if (result === 0) {
+            task.setResult(task.TaskResult.Succeeded, 'No problems found.');
+        } else if (result === 1) {
+            task.setResult(task.TaskResult.Failed, 'tfsec detected misconfigurations.');
         } else {
-            task.setResult(task.TaskResult.Failed, "Failed: tfsec detected misconfigurations.")
+            task.setResult(task.TaskResult.Failed, `tfsec execution failed with exit code ${result}.`);
         }
 
-        if (task.getBoolInput("publishTestResults", false)) {
-            console.log("Publishing JUnit results...")
-            const publisher: task.TestPublisher = new task.TestPublisher('JUnit');
-            publisher.publish(outputPath + ".junit", 'true', '', '', "tfsec", 'true', "tfsec");
+        // Publish test results if enabled
+        if (task.getBoolInput('publishTestResults', false)) {
+            try {
+                const publisher: task.TestPublisher = new task.TestPublisher('JUnit');
+                const junitPath = path.join(outputDir, 'tfsec.junit');
+                if (fs.existsSync(junitPath)) {
+                    publisher.publish(junitPath, true, '', '', 'tfsec', true, 'tfsec');
+                    task.debug('Published JUnit test results');
+                } else {
+                    task.warning('JUnit test results file not found, skipping publishing.');
+                }
+            } catch (pubErr) {
+                task.warning(`Failed to publish test results: ${pubErr}`);
+            }
         }
 
-        console.log("Publishing JSON results...")
-        task.addAttachment("JSON_RESULT", "results.json", outputPath + ".json")
+        // Publish JSON results as attachment
+        try {
+            const jsonPath = path.join(outputDir, 'tfsec.json');
+            if (fs.existsSync(jsonPath)) {
+                task.addAttachment('JSON_RESULT', 'results.json', jsonPath);
+                task.debug('Published JSON results as attachment');
+            } else {
+                task.warning('JSON results file not found, skipping attachment publishing.');
+            }
+        } catch (attachErr) {
+            task.warning(`Failed to publish JSON attachment: ${attachErr}`);
+        }
 
-        console.log("Tidying up...")
-        task.rmRF(outputPath);
+        // Cleanup temporary directory
+        try {
+            task.rmRF(tmpDir);
+            task.debug(`Cleaned up temporary directory ${tmpDir}`);
+        } catch (cleanupErr) {
+            task.warning(`Failed to clean up temporary directory: ${cleanupErr}`);
+        }
 
-        console.log("Done!");
+        task.debug('tfsec Azure DevOps task completed');
     } catch (err: any) {
-        task.setResult(task.TaskResult.Failed, err.message);
+        task.setResult(task.TaskResult.Failed, `Task failed with error: ${err.message}`);
+        task.debug(`Error stack: ${err.stack}`);
     }
 }
 
-async function getArtifactURL(): Promise<string> {
-    let version: string | undefined = task.getInput('version', true);
-    console.log("Required tfsec version is " + version)
-    let platform: string = os.platform() == "win32" ? "windows" : os.platform();
-    let arch: string = os.arch() == "x64" ? "amd64" : "386";
-    let extension: string = os.platform() == "win32" ? ".exe" : "";
-    let artifact: string = util.format("tfsec-%s-%s%s", platform, arch, extension);
-    return util.format("https://github.com/aquasecurity/tfsec/releases/download/%s/%s", version as string, artifact);
+/**
+ * Parses a command line string into arguments array respecting quotes.
+ * @param input string
+ * @returns string[]
+ */
+function parseArgs(input: string): string[] {
+    const regex = /(?:["']([^"']+)["'])|([^\s]+)/g;
+    const args: string[] = [];
+    let match: RegExpExecArray | null;
+    while ((match = regex.exec(input)) !== null) {
+        if (match[1]) {
+            args.push(match[1]);
+        } else if (match[2]) {
+            args.push(match[2]);
+        }
+    }
+    return args;
 }
 
 run();
