@@ -16,7 +16,6 @@
     "react": "16.8.1",
     "react-dom": "16.8.1",
     "react-scripts": "^5.0.1",
-    "request": "^2.88.0",
     "typescript-declaration-webpack-plugin": "^0.2.2",
     "vss-web-extension-sdk": "^5.141.0"
   },

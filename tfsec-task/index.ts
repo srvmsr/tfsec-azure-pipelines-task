@@ -4,10 +4,10 @@ import * as tool from 'azure-pipelines-tool-lib';
 import {ToolRunner} from 'azure-pipelines-task-lib/toolrunner';
 import task = require('azure-pipelines-task-lib/task');
 
-async function run() {
+async function run(): Promise<void> {
     try {
         console.log("Finding correct tfsec version...")
-        let url = await getArtifactURL()
+        const url = await getArtifactURL()
         let tmpPath = "/tmp/"
         let bin = "tfsec"
         let chmodRequired = true;
@@ -16,23 +16,23 @@ async function run() {
             bin = "tfsec.exe"
             chmodRequired = false;
         }
-        let localPath = tmpPath + bin;
+        const localPath = tmpPath + bin;
         task.rmRF(localPath);
 
         console.log("Downloading tfsec...")
-        let downloadPath = await tool.downloadTool(url, localPath);
+        const downloadPath = await tool.downloadTool(url, localPath);
         if (chmodRequired) {
             await task.exec('chmod', ["+x", downloadPath]);
         }
 
         console.log("Preparing output location...")
-        let outputPath = tmpPath + "tfsec-results-" + Math.random();
+        const outputPath = tmpPath + "tfsec-results-" + Math.random();
         task.rmRF(outputPath);
 
         console.log("Configuring options...")
-        let runner: ToolRunner = task.tool(downloadPath);
-        let args = task.getInput("args", false)
-        if (args !== undefined) {
+        const runner: ToolRunner = task.tool(downloadPath);
+        const args = task.getInput("args", false)
+        if (args !== undefined && args !== null) {
             runner.line(args)
         }
         if (task.getBoolInput("debug", false)) {
@@ -40,15 +40,15 @@ async function run() {
         }
         runner.arg(["-f", "junit,json"]);
         runner.arg(["-O", outputPath]);
-        let dir = task.getInput("dir", false)
-        if (dir !== undefined) {
+        const dir = task.getInput("dir", false)
+        if (dir !== undefined && dir !== null) {
             runner.arg(dir)
         } else {
             runner.arg(task.cwd());
         }
 
         console.log("Running tfsec...")
-        let result = runner.execSync();
+        const result = runner.execSync();
         if (result.code === 0) {
             task.setResult(task.TaskResult.Succeeded, "No problems found.")
         } else {
@@ -68,19 +68,23 @@ async function run() {
         task.rmRF(outputPath);
 
         console.log("Done!");
-    } catch (err: any) {
-        task.setResult(task.TaskResult.Failed, err.message);
+    } catch (error: unknown) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        task.setResult(task.TaskResult.Failed, errorMessage);
     }
 }
 
 async function getArtifactURL(): Promise<string> {
-    let version: string | undefined = task.getInput('version', true);
+    const version: string | undefined = task.getInput('version', true);
+    if (!version) {
+        throw new Error('Version input is required');
+    }
     console.log("Required tfsec version is " + version)
-    let platform: string = os.platform() == "win32" ? "windows" : os.platform();
-    let arch: string = os.arch() == "x64" ? "amd64" : "386";
-    let extension: string = os.platform() == "win32" ? ".exe" : "";
-    let artifact: string = util.format("tfsec-%s-%s%s", platform, arch, extension);
-    return util.format("https://github.com/aquasecurity/tfsec/releases/download/%s/%s", version as string, artifact);
+    const platform: string = os.platform() == "win32" ? "windows" : os.platform();
+    const arch: string = os.arch() == "x64" ? "amd64" : "386";
+    const extension: string = os.platform() == "win32" ? ".exe" : "";
+    const artifact: string = util.format("tfsec-%s-%s%s", platform, arch, extension);
+    return util.format("https://github.com/aquasecurity/tfsec/releases/download/%s/%s", version, artifact);
 }
 
 run();
